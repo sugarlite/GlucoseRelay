@@ -1,11 +1,20 @@
 @preconcurrency import CoreBluetooth
 import Foundation
 
+/// 设备管理器 / Device manager
+///
+/// 管理 BLE 连接生命周期：扫描、连接、服务发现、通信、断开。
+/// Manages BLE connection lifecycle: scan, connect, discover services, communicate, disconnect.
+///
+/// 实现 CBCentralManagerDelegate 和 CBPeripheralDelegate 处理 CoreBluetooth 回调。
+/// Implements CBCentralManagerDelegate and CBPeripheralDelegate for CoreBluetooth callbacks.
 actor DeviceManager: NSObject {
     private var centralManager: CBCentralManager?
     private var _connectedPeripheral: CBPeripheral?
     private var commandQueue = BLECommandQueue()
     private var profile: GlucoseProfileProtocol?
+
+    // MARK: - Continuations for async/await bridging
 
     private var scanContinuation: AsyncStream<DiscoveredDevice>.Continuation?
     private var eventContinuation: AsyncStream<BLEEvent>.Continuation?
@@ -16,12 +25,16 @@ actor DeviceManager: NSObject {
     private var writeContinuation: CheckedContinuation<Void, Error>?
     private var descriptorWriteContinuation: CheckedContinuation<Void, Error>?
 
+    // MARK: - Service discovery tracking
+
     private var discoveredServices = Set<CBUUID>()
     private var discoveredCharacteristics = Set<CBUUID>()
     private var serviceCharacteristicMap: [CBUUID: [CBUUID]] = [:]
 
+    /// 当前连接状态 / Current connection state
     var state: ConnectionState = .disconnected
 
+    /// 在已连接外设上执行操作 / Execute operation on connected peripheral
     func withConnectedPeripheral<T: Sendable>(_ operation: (CBPeripheral) async throws -> T) async throws -> T {
         guard let peripheral = _connectedPeripheral else {
             throw GlucoseMeterError.deviceDisconnected
@@ -33,10 +46,16 @@ actor DeviceManager: NSObject {
         super.init()
     }
 
+    /// 初始化 CoreBluetooth / Initialize CoreBluetooth
     func initialize() {
         centralManager = CBCentralManager(delegate: self, queue: .main)
     }
 
+    // MARK: - Scanning
+
+    /// 扫描血糖仪设备 / Scan for glucometer devices
+    /// - Parameter duration: 扫描持续时间（秒）/ Scan duration in seconds
+    /// - Returns: 发现的设备流 / Stream of discovered devices
     func scan(duration: TimeInterval) -> AsyncStream<DiscoveredDevice> {
         AsyncStream { continuation in
             self.scanContinuation = continuation
@@ -46,11 +65,13 @@ actor DeviceManager: NSObject {
                 return
             }
 
+            // 使用 Glucose Service UUID 过滤扫描 / Filter scan by Glucose Service UUID
             central.scanForPeripherals(
                 withServices: [BLEUUID.glucoseService],
                 options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
             )
 
+            // 定时停止扫描 / Stop scan after duration
             Task.detached { [weak central] in
                 try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
                 central?.stopScan()
@@ -59,6 +80,10 @@ actor DeviceManager: NSObject {
         }
     }
 
+    // MARK: - Connection
+
+    /// 连接指定设备 / Connect to a specific device
+    /// - Parameter device: 要连接的设备 / Device to connect to
     func connect(to device: DiscoveredDevice) async throws {
         guard let central = centralManager else {
             throw GlucoseMeterError.bluetoothUnavailable
@@ -91,6 +116,7 @@ actor DeviceManager: NSObject {
         }
     }
 
+    /// 断开当前连接 / Disconnect current connection
     func disconnect() async {
         guard let peripheral = _connectedPeripheral else { return }
 
@@ -102,6 +128,9 @@ actor DeviceManager: NSObject {
         }
     }
 
+    // MARK: - Service Discovery
+
+    /// 发现 BLE 服务 / Discover BLE services
     func discoverServices() async throws {
         guard let peripheral = _connectedPeripheral else {
             throw GlucoseMeterError.deviceDisconnected
@@ -118,6 +147,9 @@ actor DeviceManager: NSObject {
         }
     }
 
+    // MARK: - Notifications
+
+    /// 设置血糖测量和 RACP 通知 / Setup glucose measurement and RACP notifications
     func setupNotifications() async throws {
         guard let peripheral = _connectedPeripheral else {
             throw GlucoseMeterError.deviceDisconnected
@@ -141,6 +173,10 @@ actor DeviceManager: NSObject {
         }
     }
 
+    // MARK: - RACP Operations
+
+    /// 写入 RACP 命令 / Write RACP command
+    /// - Parameter data: RACP 命令数据 / RACP command data
     func writeRACP(_ data: Data) async throws {
         guard let peripheral = _connectedPeripheral else {
             throw GlucoseMeterError.deviceDisconnected
@@ -156,6 +192,7 @@ actor DeviceManager: NSObject {
         try await executeCommand(command, peripheral: peripheral)
     }
 
+    /// 读取特征值 / Read characteristic value
     func readCharacteristic(service: CBUUID, characteristic: CBUUID) async throws -> Data? {
         guard let peripheral = _connectedPeripheral else {
             throw GlucoseMeterError.deviceDisconnected
@@ -170,15 +207,19 @@ actor DeviceManager: NSObject {
         return try await executeReadCommand(command, peripheral: peripheral)
     }
 
+    /// 创建事件流 / Create event stream for receiving BLE events
     func createEventStream() -> AsyncStream<BLEEvent> {
         AsyncStream { continuation in
             self.eventContinuation = continuation
         }
     }
 
+    /// 设置协议解析器 / Set protocol parser
     func setProfile(_ profile: GlucoseProfileProtocol) {
         self.profile = profile
     }
+
+    // MARK: - Private Command Execution
 
     private func executeCommand(_ command: BLECommand, peripheral: CBPeripheral) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -245,6 +286,8 @@ actor DeviceManager: NSObject {
         }
     }
 }
+
+// MARK: - CBCentralManagerDelegate
 
 extension DeviceManager: CBCentralManagerDelegate {
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
@@ -348,6 +391,8 @@ extension DeviceManager: CBCentralManagerDelegate {
     }
 }
 
+// MARK: - CBPeripheralDelegate
+
 extension DeviceManager: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         Task.detached { [error] in
@@ -368,6 +413,7 @@ extension DeviceManager: CBPeripheralDelegate {
             return
         }
 
+        // 发现每个服务的特征值 / Discover characteristics for each service
         for service in services {
             peripheral.discoverCharacteristics(nil, for: service)
         }
@@ -401,6 +447,7 @@ extension DeviceManager: CBPeripheralDelegate {
             serviceCharacteristicMap[service.uuid] = charUUIDs
         }
 
+        // 检查所有服务是否都已发现特征值 / Check if all services have discovered characteristics
         let allServicesDiscovered = _connectedPeripheral?.services?.allSatisfy { discoveredServices.contains($0.uuid) } ?? false
 
         if allServicesDiscovered {
@@ -430,7 +477,7 @@ extension DeviceManager: CBPeripheralDelegate {
                         eventContinuation?.yield(.measurement(reading))
                     }
                 } catch {
-                    // Silently ignore parse errors for individual measurements
+                    // 静默忽略单个测量解析错误 / Silently ignore parse errors for individual measurements
                 }
             }
 

@@ -1,6 +1,10 @@
 import CoreBluetooth
 import Foundation
 
+/// 罗氏血糖仪协议实现 / Roche glucometer protocol implementation
+///
+/// 基于标准 BLE Glucose Profile，适配罗氏 Accu-Chek 系列设备的特定处理。
+/// Based on standard BLE Glucose Profile, adapted for Roche Accu-Chek series specific handling.
 final class RocheGlucoseProfile: GlucoseProfileProtocol {
     var supportedServices: [CBUUID] {
         [
@@ -19,6 +23,8 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
     }
 
     private let deviceId: String = ""
+
+    // MARK: - Service Discovery
 
     func onServicesDiscovered(peripheral: CBPeripheral) async throws -> [BLECommand] {
         guard let services = peripheral.services else {
@@ -53,6 +59,22 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
         return []
     }
 
+    // MARK: - Glucose Measurement Parsing
+
+    /// 解析血糖测量数据包 / Parse glucose measurement packet
+    ///
+    /// 数据包格式遵循 Bluetooth SIG Glucose Profile 规范：
+    /// Packet format follows Bluetooth SIG Glucose Profile specification:
+    ///
+    ///     Offset 0:   Flags (1 byte)
+    ///     Offset 1-2: Sequence Number (2 bytes, little-endian)
+    ///     Offset 3-4: Year (2 bytes, little-endian)
+    ///     Offset 5:   Month (1 byte)
+    ///     Offset 6:   Day (1 byte)
+    ///     Offset 7:   Hours (1 byte)
+    ///     Offset 8:   Minutes (1 byte)
+    ///     Offset 9:   Seconds (1 byte)
+    ///     Offset 10+: Optional fields based on flags
     func parseGlucoseMeasurement(_ data: Data) throws -> GlucoseReading {
         guard data.count >= 10 else {
             throw GlucoseMeterError.invalidDataFormat
@@ -79,6 +101,7 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
 
         var index = 10
 
+        // 跳过 Time Offset（如果存在）/ Skip Time Offset if present
         if timeOffsetPresent {
             guard data.count >= index + 2 else {
                 throw GlucoseMeterError.invalidDataFormat
@@ -86,6 +109,7 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
             index += 2
         }
 
+        // 解析 SFLOAT 血糖浓度 / Parse SFLOAT glucose concentration
         guard let sf = SFLOAT(data: data, offset: index) else {
             throw GlucoseMeterError.sfFloatParseError
         }
@@ -93,15 +117,18 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
         let mgdl: Double
         let unit: GlucoseUnit
         if concentrationUnitKgL {
+            // kg/L → mg/dL: value * 100000
             mgdl = sf.value * 100000
             unit = .mgPerDL
         } else {
-            // 设备发送的是 mmol/L（不是 mol/L），直接乘以转换系数
+            // 设备发送的是 mmol/L，直接乘以转换系数
+            // Device sends mmol/L directly, multiply by conversion factor
             mgdl = sf.value * 18.0182
             unit = .mmolPerL
         }
         index += 2
 
+        // 解析样本类型和位置 / Parse sample type and location
         var sampleType: SampleType = .capillaryWholeBlood
         var sampleLocation: SampleLocation = .finger
         if typeAndLocationPresent {
@@ -114,10 +141,12 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
             index += 1
         }
 
+        // 跳过传感器状态（如果存在）/ Skip sensor status if present
         if sensorStatusPresent {
             index += 1
         }
 
+        // 构建时间戳 / Build timestamp
         var components = DateComponents()
         components.year = Int(year)
         components.month = month
@@ -145,6 +174,12 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
         )
     }
 
+    // MARK: - Context Parsing
+
+    /// 解析血糖测量上下文 / Parse glucose measurement context
+    ///
+    /// 上下文数据包含用餐类型等附加信息。
+    /// Context data contains additional information such as meal type.
     func parseContextData(_ data: Data) -> GlucoseContext? {
         guard data.count >= 3 else { return nil }
 
@@ -177,11 +212,20 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
         )
     }
 
+    // MARK: - RACP Commands
+
+    /// 构建 RACP 命令 / Build RACP command
+    ///
+    /// RACP (Record Access Control Point) 用于请求血糖记录。
+    /// RACP is used to request glucose records from the device.
     func buildRACPCommand(filter: RecordFilter) -> Data {
         switch filter {
         case .all:
+            // Opcode 0x01 = Report Records, Operator 0x01 = All Records
             return Data([0x01, 0x01])
         case .sinceSequence(let seq):
+            // Opcode 0x01 = Report Records, Operator 0x03 = Greater Than or Equal To
+            // Filter Type 0x01 = Sequence Number
             var data = Data([0x01, 0x03, 0x01])
             data.append(UInt8(seq & 0xFF))
             data.append(UInt8((seq >> 8) & 0xFF))
@@ -191,6 +235,7 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
         }
     }
 
+    /// 处理 RACP 响应 / Handle RACP response
     func handleRACPResponse(_ data: Data) -> RACPResult {
         guard data.count >= 2 else { return .unknown }
 
@@ -198,12 +243,15 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
 
         switch opcode {
         case 0x05:
+            // Number of Records Response
             guard data.count >= 4 else { return .unknown }
             let numberOfRecords = UInt16(data[2]) | (UInt16(data[3]) << 8)
             return .numberOfRecords(Int(numberOfRecords))
         case 0x06:
+            // Response Code (success indication)
             return .complete
         case 0x07:
+            // Error response
             guard data.count >= 3 else { return .unknown }
             let responseCode = RACPResponseCode(rawValue: data[2]) ?? .unknown
             return .responseCode(responseCode)
@@ -212,6 +260,9 @@ final class RocheGlucoseProfile: GlucoseProfileProtocol {
         }
     }
 
+    // MARK: - Device Time Parsing
+
+    /// 解析设备时间 / Parse device time
     func parseDeviceTime(_ data: Data) -> Date? {
         guard data.count >= 7 else { return nil }
 

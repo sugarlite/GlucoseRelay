@@ -1,6 +1,10 @@
 import CoreBluetooth
 import Foundation
 
+/// 标准 BLE Glucose Profile 实现 / Standard BLE Glucose Profile implementation
+///
+/// 实现蓝牙 SIG 标准 Glucose Profile 协议，适用于所有兼容设备。
+/// Implements Bluetooth SIG standard Glucose Profile protocol, compatible with all standard devices.
 final class StandardGlucoseProfile: GlucoseProfileProtocol {
     var supportedServices: [CBUUID] {
         [
@@ -19,6 +23,8 @@ final class StandardGlucoseProfile: GlucoseProfileProtocol {
     }
 
     private let deviceId: String = ""
+
+    // MARK: - Service Discovery
 
     func onServicesDiscovered(peripheral: CBPeripheral) async throws -> [BLECommand] {
         guard let services = peripheral.services else {
@@ -52,6 +58,8 @@ final class StandardGlucoseProfile: GlucoseProfileProtocol {
     func onManufacturerNameRead(_ name: String) -> [BLECommand] {
         return []
     }
+
+    // MARK: - Glucose Measurement Parsing
 
     func parseGlucoseMeasurement(_ data: Data) throws -> GlucoseReading {
         guard data.count >= 10 else {
@@ -144,6 +152,8 @@ final class StandardGlucoseProfile: GlucoseProfileProtocol {
         )
     }
 
+    // MARK: - Context Parsing
+
     func parseContextData(_ data: Data) -> GlucoseContext? {
         guard data.count >= 3 else { return nil }
 
@@ -175,6 +185,8 @@ final class StandardGlucoseProfile: GlucoseProfileProtocol {
             hasCarbInfo: hasCarbInfo
         )
     }
+
+    // MARK: - RACP Commands
 
     func buildRACPCommand(filter: RecordFilter) -> Data {
         switch filter {
@@ -210,6 +222,8 @@ final class StandardGlucoseProfile: GlucoseProfileProtocol {
             return .unknown
         }
     }
+
+    // MARK: - Device Time Parsing
 
     func parseDeviceTime(_ data: Data) -> Date? {
         guard data.count >= 7 else { return nil }
